@@ -1,0 +1,2 @@
+"""STFC verifier alliance profile."""
+

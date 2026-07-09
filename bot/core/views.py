@@ -1,0 +1,379 @@
+import logging
+from typing import Callable, Optional
+
+import discord
+
+from bot.core.i18n.translator import Translator
+
+log = logging.getLogger("veil_bot")
+
+
+class StartWizardView(discord.ui.View):
+    def __init__(self, store, support_ticket_fn: Callable[[], str], translator: Translator):
+        super().__init__(timeout=None)
+        self._store = store
+        self._support_ticket = support_ticket_fn
+        self._t = translator
+        self.confirmation_message_id = None
+        self.confirmation_channel_id = None
+
+    @discord.ui.button(label="Start Verification", style=discord.ButtonStyle.green, custom_id="start_wizard_verify")
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        locale = interaction.locale
+
+        if self._store.get_player_data(user_id):
+            await interaction.response.send_message(
+                self._t.t(locale, "wizard.already_verified",
+                         support_ticket=self._support_ticket()),
+                ephemeral=True,
+            )
+            log.info(f"[WIZARD] User {user_id} attempted re-verification (already verified)")
+            return
+
+        self._store.create_wizard_session(user_id)
+        log.info(f"[WIZARD] Created session for user {user_id}")
+
+        self._store.delete_pending_wizard_views_by_user(user_id)
+
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+
+        embed = discord.Embed(
+            title=self._t.t(locale, "wizard.step1.title"),
+            description=self._t.t(locale, "wizard.step1.description"),
+            colour=discord.Colour.blue(),
+        )
+        embed.set_footer(text=self._t.t(locale, "wizard.step1.footer"))
+        await interaction.followup.send(embed=embed)
+        if self.confirmation_message_id:
+            try:
+                self._store.delete_pending_wizard_view(self.confirmation_message_id)
+            except Exception as e:
+                log.warning(f"[WIZARD] Could not clear pending wizard view: {e}")
+        log.info(f"[WIZARD] User {user_id} started verification wizard")
+
+
+class SkipStepsView(discord.ui.View):
+    def __init__(self, user_id: int, store, translator: Translator):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self._store = store
+        self._t = translator
+        self.confirmation_message_id = None
+        self.confirmation_channel_id = None
+
+    @discord.ui.button(label="🔄 Restart", style=discord.ButtonStyle.danger, custom_id="skip_steps_restart")
+    async def restart_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                self._t.t(interaction.locale, "wizard.not_your_session"),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+
+        self._store.delete_pending_wizard_views_by_user(self.user_id)
+
+        self._store.update_wizard_session(self.user_id, step=1, stfc_link=None, screenshot_data=None)
+
+        embed = discord.Embed(
+            title=self._t.t(interaction.locale, "wizard.step1.title"),
+            description=self._t.t(interaction.locale, "wizard.step1.description"),
+            colour=discord.Colour.blue(),
+        )
+        embed.set_footer(text=self._t.t(interaction.locale, "wizard.step1.footer"))
+        await interaction.followup.send(embed=embed)
+        if self.confirmation_message_id:
+            try:
+                self._store.delete_pending_wizard_view(self.confirmation_message_id)
+            except Exception as e:
+                log.warning(f"[WIZARD] Could not clear pending wizard view: {e}")
+        log.info(f"[WIZARD] User {self.user_id} restarted verification wizard")
+
+
+class SessionExpiredView(discord.ui.View):
+    def __init__(self, user_id: int, store, translator: Translator):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self._store = store
+        self._t = translator
+        self.confirmation_message_id = None
+        self.confirmation_channel_id = None
+
+    @discord.ui.button(label="🔄 Restart Verification", style=discord.ButtonStyle.green, custom_id="session_expired_restart")
+    async def restart_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                self._t.t(interaction.locale, "wizard.not_your_session"),
+                ephemeral=True,
+            )
+            return
+
+        self._store.create_wizard_session(self.user_id)
+        log.info(f"[WIZARD] Created new session for user {self.user_id} after timeout")
+
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+
+        self._store.delete_pending_wizard_views_by_user(self.user_id)
+
+        embed = discord.Embed(
+            title=self._t.t(interaction.locale, "wizard.step1.title"),
+            description=self._t.t(interaction.locale, "wizard.step1.description"),
+            colour=discord.Colour.blue(),
+        )
+        embed.set_footer(text=self._t.t(interaction.locale, "wizard.step1.footer_expired"))
+        await interaction.followup.send(embed=embed)
+        if self.confirmation_message_id:
+            try:
+                self._store.delete_pending_wizard_view(self.confirmation_message_id)
+            except Exception as e:
+                log.warning(f"[WIZARD] Could not clear pending wizard view: {e}")
+        log.info(f"[WIZARD] Restarted wizard for user {self.user_id}")
+
+
+class ConfirmVerificationView(discord.ui.View):
+    def __init__(self, user_id: int, store, finalize_callback: Callable, translator: Translator):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self._store = store
+        self._finalize = finalize_callback
+        self._t = translator
+        self.confirmation_message_id = None
+        self.confirmation_channel_id = None
+
+    @discord.ui.button(label="✅ Complete", style=discord.ButtonStyle.green, custom_id="confirm_verification_complete")
+    async def complete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                self._t.t(interaction.locale, "wizard.not_your_session"),
+                ephemeral=True,
+            )
+            return
+
+        session = self._store.get_wizard_session(self.user_id)
+        if not session:
+            await interaction.response.send_message(
+                self._t.t(interaction.locale, "wizard.session_expired"),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+        await interaction.message.edit(view=None)
+
+        self._store.delete_pending_wizard_views_by_user(self.user_id)
+
+        session = self._store.get_wizard_session(self.user_id)
+        await self._finalize(interaction, session)
+        self._store.delete_wizard_session(self.user_id)
+        if self.confirmation_message_id:
+            try:
+                self._store.delete_pending_wizard_view(self.confirmation_message_id)
+            except Exception as e:
+                log.warning(f"[WIZARD] Could not clear pending wizard view: {e}")
+
+    @discord.ui.button(label="🔄 Restart", style=discord.ButtonStyle.danger, custom_id="confirm_verification_restart")
+    async def restart_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                self._t.t(interaction.locale, "wizard.not_your_session"),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+
+        self._store.delete_pending_wizard_views_by_user(self.user_id)
+        self._store.update_wizard_session(self.user_id, step=1, stfc_link=None, screenshot_data=None)
+
+        embed = discord.Embed(
+            title=self._t.t(interaction.locale, "wizard.step1.title"),
+            description=self._t.t(interaction.locale, "wizard.step1.description"),
+            colour=discord.Colour.blue(),
+        )
+        embed.set_footer(text=self._t.t(interaction.locale, "wizard.step1.footer"))
+        await interaction.followup.send(embed=embed)
+        if self.confirmation_message_id:
+            try:
+                self._store.delete_pending_wizard_view(self.confirmation_message_id)
+            except Exception as e:
+                log.warning(f"[WIZARD] Could not clear pending wizard view: {e}")
+        log.info(f"[WIZARD] User {self.user_id} restarted verification wizard")
+
+
+class RankConfirmationView(discord.ui.View):
+    def __init__(self, user_id: int, member_name: str, rank: str, player_name: str,
+                 alliance_tag: str, settings, store, guild_provider: Callable,
+                 translator: Translator):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.member_name = member_name
+        self.rank = rank
+        self.player_name = player_name
+        self.alliance_tag = alliance_tag
+        self.settings = settings
+        self.store = store
+        self._guild_provider = guild_provider
+        self._t = translator
+        self.confirmed = None
+        self.user_message = None
+        self.log_message = None
+        self.confirmation_message_id = None
+        self.confirmation_channel_id = None
+
+    @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.green, custom_id="rank_accept")
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message(
+                self._t.t(interaction.locale, "rank.confirm.not_admin"),
+                ephemeral=True,
+            )
+            return
+        self.confirmed = True
+        await interaction.response.defer()
+        await self.on_confirmation(interaction.guild)
+        if self.log_message:
+            try:
+                embed = self.log_message.embeds[0] if self.log_message.embeds else None
+                if embed:
+                    embed.color = discord.Color.green()
+                    embed.title = self._t.t(interaction.locale, "rank.confirm.accepted_title")
+                    await self.log_message.edit(embed=embed, view=None)
+            except Exception as e:
+                log.warning(f"[CONFIRM] Could not edit log message: {e}")
+        self.stop()
+
+    @discord.ui.button(label="❌ Reject", style=discord.ButtonStyle.red, custom_id="rank_reject")
+    async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message(
+                self._t.t(interaction.locale, "rank.confirm.not_admin"),
+                ephemeral=True,
+            )
+            return
+        self.confirmed = False
+        await interaction.response.defer()
+        await self.on_confirmation(interaction.guild)
+        if self.log_message:
+            try:
+                embed = self.log_message.embeds[0] if self.log_message.embeds else None
+                if embed:
+                    embed.color = discord.Color.red()
+                    embed.title = self._t.t(interaction.locale, "rank.confirm.rejected_title")
+                    await self.log_message.edit(embed=embed, view=None)
+            except Exception as e:
+                log.warning(f"[CONFIRM] Could not edit log message: {e}")
+        self.stop()
+
+    def _is_admin(self, interaction: discord.Interaction) -> bool:
+        if not self.settings.admin_role_id:
+            return True
+        role = interaction.guild.get_role(self.settings.admin_role_id)
+        return role is not None and role in interaction.user.roles
+
+    async def on_confirmation(self, guild: discord.Guild):
+        member = guild.get_member(self.user_id)
+        if not member:
+            log.warning(f"[CONFIRM] Member {self.user_id} not found for confirmation")
+            return
+
+        if self.confirmed:
+            log.info(f"[CONFIRM] Admin ACCEPTED rank change for {self.member_name}: {self.rank}")
+            commodore_role = guild.get_role(self.settings.commodore_role_id) if self.settings.commodore_role_id else None
+            admiral_role = guild.get_role(self.settings.admiral_role_id) if self.settings.admiral_role_id else None
+
+            rank_tier = self._get_rank_tier(self.rank)
+
+            try:
+                if rank_tier == "commodore":
+                    if commodore_role:
+                        await member.add_roles(commodore_role, reason=f"Confirmed rank: {self.rank}")
+                    if admiral_role and admiral_role in member.roles:
+                        await member.remove_roles(admiral_role, reason="Rank downgrade")
+                    log.info(f"[CONFIRM] Assigned commodore role to {self.member_name}")
+                elif rank_tier == "admiral":
+                    if admiral_role:
+                        await member.add_roles(admiral_role, reason=f"Confirmed rank: {self.rank}")
+                    if commodore_role and commodore_role in member.roles:
+                        await member.remove_roles(commodore_role, reason="Rank promotion")
+                    log.info(f"[CONFIRM] Assigned admiral role to {self.member_name}")
+            except Exception as e:
+                log.error(f"[CONFIRM] Error assigning leadership role: {e}")
+
+            if self.user_message:
+                try:
+                    embed = discord.Embed(
+                        title=self._t.t(self.user_message.guild.preferred_locale, "rank.confirm.user_accepted_title"),
+                        description=self._t.t(self.user_message.guild.preferred_locale, "rank.confirm.user_accepted_desc", player_name=self.player_name),
+                        color=discord.Color.green(),
+                    )
+                    embed.add_field(name=self._t.t(self.user_message.guild.preferred_locale, "rank.label"), value=self.rank, inline=True)
+                    embed.add_field(name=self._t.t(self.user_message.guild.preferred_locale, "rank.alliance_label"), value=f"[{self.alliance_tag}]" if self.alliance_tag != "N/A" else "N/A", inline=True)
+                    await self.user_message.edit(embed=embed)
+                except Exception as e:
+                    log.warning(f"[CONFIRM] Could not edit user message: {e}")
+
+            try:
+                dm_embed = discord.Embed(
+                    title=self._t.t(None, "rank.confirm.dm_accepted_title"),
+                    description=self._t.t(None, "rank.confirm.dm_accepted_desc", rank=self.rank),
+                    color=discord.Color.green(),
+                )
+                dm_embed.add_field(name=self._t.t(None, "rank.label"), value=self.rank, inline=True)
+                dm_embed.add_field(name=self._t.t(None, "rank.alliance_label"), value=f"[{self.alliance_tag}]" if self.alliance_tag != "N/A" else "N/A", inline=True)
+                dm_embed.add_field(name=self._t.t(None, "rank.confirm.dm_status"), value=self._t.t(None, "rank.confirm.dm_status_value"), inline=False)
+                dm_embed.set_footer(text=self._t.t(None, "rank.confirm.dm_footer"))
+                await member.send(embed=dm_embed)
+                log.info(f"[CONFIRM] Sent DM confirmation to {member.id}")
+            except discord.Forbidden:
+                log.warning(f"[CONFIRM] Could not send DM to {member.id} (DMs disabled)")
+            except Exception as e:
+                log.warning(f"[CONFIRM] Error sending DM to {member.id}: {e}")
+        else:
+            log.info(f"[CONFIRM] Admin REJECTED rank change for {self.member_name}: {self.rank}")
+            if self.user_message:
+                try:
+                    embed = discord.Embed(
+                        title=self._t.t(self.user_message.guild.preferred_locale, "rank.confirm.user_rejected_title"),
+                        description=self._t.t(self.user_message.guild.preferred_locale, "rank.confirm.user_rejected_desc", rank=self.rank),
+                        color=discord.Color.red(),
+                    )
+                    await self.user_message.edit(embed=embed)
+                except Exception as e:
+                    log.warning(f"[CONFIRM] Could not edit user message: {e}")
+
+            try:
+                dm_embed = discord.Embed(
+                    title=self._t.t(None, "rank.confirm.dm_rejected_title"),
+                    description=self._t.t(None, "rank.confirm.dm_rejected_desc", rank=self.rank),
+                    color=discord.Color.red(),
+                )
+                dm_embed.add_field(name=self._t.t(None, "rank.confirm.dm_next_steps"), value=self._t.t(None, "rank.confirm.dm_next_steps_value"), inline=False)
+                await member.send(embed=dm_embed)
+                log.info(f"[CONFIRM] Sent DM rejection notice to {member.id}")
+            except discord.Forbidden:
+                log.warning(f"[CONFIRM] Could not send DM to {member.id} (DMs disabled)")
+            except Exception as e:
+                log.warning(f"[CONFIRM] Error sending DM to {member.id}: {e}")
+
+        if self.confirmation_message_id:
+            try:
+                self.store.delete_pending_rank_confirmation(self.confirmation_message_id)
+                log.info(f"[CONFIRM] Cleared pending confirmation for {self.member_name}")
+            except Exception as e:
+                log.warning(f"[CONFIRM] Could not clear pending confirmation: {e}")
+
+    @staticmethod
+    def _get_rank_tier(rank: Optional[str]) -> Optional[str]:
+        tiers = {
+            "agent": "base", "operative": "base", "premier": "base",
+            "commodore": "commodore", "admiral": "admiral",
+        }
+        if not rank:
+            return None
+        return tiers.get(rank.lower())

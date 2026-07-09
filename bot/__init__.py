@@ -1,0 +1,2 @@
+"""Merged verifier bot package."""
+

@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Data (SQLite databases)
+data/
+*.db
+*.sqlite3
+
+# Test cache
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db

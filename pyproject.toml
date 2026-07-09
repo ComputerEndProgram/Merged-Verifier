@@ -1,0 +1,29 @@
+[project]
+name = "merged-verifier"
+version = "0.1.0"
+description = "Merged Discord verifier bot with profile-driven behavior."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "discord.py",
+  "python-dotenv",
+  "beautifulsoup4",
+  "requests",
+  "opencv-python-headless",
+  "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+
+[project.scripts]
+merged-verifier = "bot.main:main"
+
+[tool.setuptools.packages.find]
+include = ["bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
