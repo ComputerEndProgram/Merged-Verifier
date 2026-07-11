@@ -1,7 +1,7 @@
 [project]
-name = "merged-verifier"
+name = "verifier"
 version = "0.1.0"
-description = "Merged Discord verifier bot with profile-driven behavior."
+description = "Discord verifier bot with profile-driven behavior."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,10 +19,13 @@ dev = [
 ]
 
 [project.scripts]
-merged-verifier = "bot.main:main"
+dtb-verifier = "bot.main:main"
 
 [tool.setuptools.packages.find]
 include = ["bot*"]
+
+[tool.setuptools.package-data]
+"bot.i18n" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

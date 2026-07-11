@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -7,8 +8,20 @@ from discord.ext import commands
 from bot.core.store import _support_ticket_text
 from bot.core.i18n.translator import Translator
 from bot.core.views import StartWizardView
+from bot.legacy_profiles.stfc_verifier.stfc_scraper import STFCProScraper, format_player_info
 
 log = logging.getLogger("veil_bot")
+
+_RANK_TIERS = {
+    "agent": "base", "operative": "base", "premier": "base",
+    "commodore": "commodore", "admiral": "admiral",
+}
+
+
+def _get_rank_tier(rank: Optional[str]) -> Optional[str]:
+    if not rank:
+        return None
+    return _RANK_TIERS.get(rank.lower())
 
 
 class AdminCog(commands.Cog):
@@ -18,10 +31,10 @@ class AdminCog(commands.Cog):
         self.bot = bot
         self._t = Translator(bot.settings.default_language)
 
-    recall = app_commands.Group(name="recall", description="Recall commands")
+    admin = app_commands.Group(name="admin", description="Admin commands")
 
-    @recall.command(
-        name="verification",
+    @admin.command(
+        name="recall",
         description="[ADMIN] Recall a user's verification, remove all roles, and alert them",
     )
     @app_commands.guild_only()
@@ -177,6 +190,191 @@ class AdminCog(commands.Cog):
                 log.warning(f"[RECALL] Could not log to channel: {e}")
 
         log.info(f"[RECALL] user={member.id} admin={interaction.user.id} reason={reason}")
+
+    @admin.command(
+        name="verify",
+        description="[ADMIN] Manually verify a user with their STFC player link (skips wizard)",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        player_url="Player stfc.pro/stfc.wtf URL or numeric player ID",
+        user="The Discord user to verify",
+    )
+    async def admin_verify_cmd(
+        self,
+        interaction: discord.Interaction,
+        player_url: str,
+        user: discord.User,
+    ):
+        if not interaction.user or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message(
+                "❌ Could not verify your permissions.",
+                ephemeral=True,
+            )
+
+        settings = self.bot.settings
+        store = self.bot.store
+
+        admin_role = (
+            interaction.guild.get_role(settings.admin_role_id)
+            if interaction.guild and settings.admin_role_id
+            else None
+        )
+        if not admin_role or admin_role not in interaction.user.roles:
+            return await interaction.response.send_message(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(thinking=True)
+
+        guild = self.bot.get_guild(settings.guild_id)
+        if not guild:
+            return await interaction.followup.send("❌ Could not access the server.", ephemeral=True)
+
+        member = guild.get_member(user.id)
+        if not member:
+            return await interaction.followup.send(
+                "❌ User is not in the server or could not be found.",
+                ephemeral=True,
+            )
+
+        player_id = STFCProScraper.extract_player_id_from_url(player_url.strip())
+        if not player_id:
+            return await interaction.followup.send(
+                "❌ Invalid player link. Use format:\n"
+                "`https://stfc.pro/players/XXXXXXXXXXXXX` or `https://stfc.wtf/players/XXXXXXXXXXXXX` or just `XXXXXXXXXXXXX`",
+                ephemeral=True,
+            )
+
+        player_data = STFCProScraper.fetch_player_data(player_id)
+        if not player_data:
+            return await interaction.followup.send(
+                f"❌ Could not fetch player data from stfc.pro for ID `{player_id}`. Check the link.",
+                ephemeral=True,
+            )
+
+        if store.is_player_id_taken(player_id, exclude_user_id=user.id):
+            return await interaction.followup.send(
+                "❌ This STFC player account is already linked to another Discord user.",
+                ephemeral=True,
+            )
+
+        feedback = ["📋 **Admin Verification Complete**\n"]
+        feedback.append("✅ **stfc.pro Data:**")
+        feedback.append(f"  {format_player_info(player_data)}\n")
+
+        new_nick = self.bot._build_nickname(player_data)
+        try:
+            await member.edit(nick=new_nick)
+            feedback.append(f"✅ Nickname set to: `{new_nick}`")
+            log.info(f"[ADMIN] Set nickname for {member.id}: {new_nick}")
+        except discord.Forbidden:
+            feedback.append("⚠️ Could not set nickname (missing permissions)")
+            log.warning(f"[ADMIN] Could not set nickname for {member.id} (Forbidden)")
+        except Exception as e:
+            feedback.append(f"⚠️ Error setting nickname: {e}")
+            log.error(f"[ADMIN] Error setting nickname for {member.id}: {e}")
+
+        store.store_stfc_player(member.id, player_url, player_data)
+        store.delete_pending_wizard_views_by_user(member.id)
+
+        try:
+            role_feedback, confirmation_view = await self.bot._assign_roles(member, player_data, interaction)
+            feedback.extend(role_feedback)
+        except Exception as e:
+            feedback.append(f"❌ Error assigning roles: {e}")
+            log.error(f"[ADMIN] Error assigning roles to {member.id}: {e}")
+            confirmation_view = None
+
+        store.mark_verified(member.id)
+        store.log_verification_action(member.id, "verified", interaction.user.id, "Manual admin verification")
+        feedback.append("💾 Player data stored for periodic updates")
+
+        if settings.verified_role_id:
+            verify_role = guild.get_role(settings.verified_role_id)
+            if verify_role:
+                try:
+                    await member.add_roles(verify_role, reason="Verified via admin command")
+                    feedback.append("✅ Verification role assigned")
+                    log.info(f"[ADMIN] Assigned verify role to {member.id}")
+                except Exception as e:
+                    feedback.append(f"⚠️ Error assigning verify role: {e}")
+                    log.warning(f"[ADMIN] Error assigning verify role to {member.id}: {e}")
+
+        feedback_text = "\n".join(feedback)
+        await interaction.followup.send(feedback_text, ephemeral=True)
+
+        if settings.log_channel_id:
+            session = {
+                "user_id": member.id,
+                "stfc_link": player_url,
+                "screenshot_data": None,
+            }
+            embed = self.bot._build_log_embed(member, player_data, session)
+            embed.add_field(
+                name="Action",
+                value=f"Manual verification by {interaction.user.mention}",
+                inline=False,
+            )
+            rank_tier = _get_rank_tier(getattr(player_data, "rank", None))
+            if rank_tier and rank_tier != "base":
+                embed.add_field(name="Rank Tier", value=rank_tier.title(), inline=True)
+
+            try:
+                log_msg = await self.bot.post_to_log_channel(embed)
+                log.info("[ADMIN] Logged manual verification to log channel")
+
+                if confirmation_view and log_msg:
+                    confirmation_view.log_message = log_msg
+                    admin_ping = (
+                        f"<@&{settings.admin_role_id}>" if settings.admin_role_id else "Admins"
+                    )
+                    alliance_display = (
+                        f"[{player_data.alliance_tag}]" if player_data.alliance_tag else "N/A"
+                    )
+                    confirm_embed = discord.Embed(
+                        title="🔔 Leadership Rank Confirmation Required",
+                        description="Please confirm this rank promotion.",
+                        color=discord.Color.orange(),
+                    )
+                    confirm_embed.add_field(
+                        name="Player",
+                        value=f"{member.mention} ({player_data.username})",
+                        inline=False,
+                    )
+                    confirm_embed.add_field(
+                        name="Rank",
+                        value=getattr(player_data, "rank", "N/A"),
+                        inline=True,
+                    )
+                    confirm_embed.add_field(
+                        name="Alliance", value=alliance_display, inline=True
+                    )
+                    confirm_msg = await self.bot.post_to_log_channel(
+                        embed=confirm_embed, view=confirmation_view, content=admin_ping
+                    )
+                    if confirm_msg:
+                        confirmation_view.log_message = confirm_msg
+                        confirmation_view.confirmation_message_id = confirm_msg.id
+                        confirmation_view.confirmation_channel_id = confirm_msg.channel.id
+                        store.save_pending_rank_confirmation(
+                            confirm_msg.id,
+                            confirm_msg.channel.id,
+                            member.id,
+                            str(member),
+                            player_data.rank,
+                            player_data.username,
+                            player_data.alliance_tag or "N/A",
+                        )
+            except Exception as e:
+                log.warning(f"[ADMIN] Could not log to channel: {e}")
+
+        log.info(
+            f"[ADMIN] user={member.id} name={player_data.username} "
+            f"server={player_data.server} alliance={player_data.alliance_tag} "
+            f"level={player_data.level} admin={interaction.user.id}"
+        )
 
 
 async def setup(bot: commands.Bot):

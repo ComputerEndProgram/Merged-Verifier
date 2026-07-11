@@ -1,11 +1,11 @@
 import importlib
 import os
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from bot.config.profiles import get_profile
 
-load_dotenv()
+load_dotenv(find_dotenv(usecwd=True))
 
 PROFILE_MODULES = {
     "stfc_verifier": "bot.legacy_profiles.stfc_verifier",

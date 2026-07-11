@@ -2,6 +2,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 
@@ -26,6 +27,7 @@ class ProfileStore:
 
     def __init__(self, path: str):
         self.path = path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _init_db(self):
