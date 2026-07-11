@@ -376,6 +376,97 @@ class AdminCog(commands.Cog):
             f"level={player_data.level} admin={interaction.user.id}"
         )
 
+    @admin.command(
+        name="send_button",
+        description="[ADMIN] Post the verification button to the verify channel",
+    )
+    @app_commands.guild_only()
+    async def send_button_cmd(self, interaction: discord.Interaction):
+        if not interaction.user or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message(
+                "❌ Could not verify your permissions.",
+                ephemeral=True,
+            )
+
+        settings = self.bot.settings
+        store = self.bot.store
+
+        admin_role = (
+            interaction.guild.get_role(settings.admin_role_id)
+            if interaction.guild and settings.admin_role_id
+            else None
+        )
+        if not admin_role or admin_role not in interaction.user.roles:
+            return await interaction.response.send_message(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True,
+            )
+
+        if not settings.verify_channel_id:
+            return await interaction.response.send_message(
+                "❌ VERIFY_CHANNEL_ID is not configured.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True)
+
+        guild = self.bot.get_guild(settings.guild_id)
+        if not guild:
+            return await interaction.followup.send("❌ Could not access the server.", ephemeral=True)
+
+        channel = guild.get_channel(settings.verify_channel_id)
+        if not channel:
+            return await interaction.followup.send(
+                f"❌ Verify channel <#{settings.verify_channel_id}> not found.",
+                ephemeral=True,
+            )
+
+        embed = discord.Embed(
+            title=self._t.t(None, "wizard.welcome.title"),
+            description=self._t.t(None, "wizard.welcome.description"),
+            colour=discord.Colour.blurple(),
+        )
+        embed.add_field(
+            name=self._t.t(None, "wizard.welcome.field_what"),
+            value=self._t.t(None, "wizard.welcome.field_what_value"),
+            inline=False,
+        )
+        embed.add_field(
+            name=self._t.t(None, "wizard.welcome.field_rules"),
+            value=self._t.t(None, "wizard.welcome.field_rules_value"),
+            inline=False,
+        )
+        embed.add_field(
+            name=self._t.t(None, "wizard.welcome.field_ready"),
+            value=self._t.t(None, "wizard.welcome.field_ready_value"),
+            inline=False,
+        )
+        embed.set_footer(text=self._t.t(None, "wizard.welcome.footer"))
+
+        try:
+            await channel.send(
+                embed=embed,
+                view=StartWizardView(
+                    store,
+                    lambda: _support_ticket_text(settings.support_channel_id),
+                    self._t,
+                ),
+            )
+            await interaction.followup.send(
+                f"✅ Verification button posted to <#{settings.verify_channel_id}>.",
+                ephemeral=True,
+            )
+            log.info(f"[ADMIN] Sent verification button to channel {settings.verify_channel_id} by {interaction.user.id}")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to send messages in that channel.",
+                ephemeral=True,
+            )
+            log.warning(f"[ADMIN] Could not send to verify channel {settings.verify_channel_id} (Forbidden)")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+            log.error(f"[ADMIN] Error sending verification button: {e}")
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCog(bot))
