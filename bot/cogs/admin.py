@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from bot.core.store import _support_ticket_text
 from bot.core.i18n.translator import Translator
-from bot.core.views import StartWizardView
+from bot.core.views import ChannelStartView, StartWizardView
 from bot.legacy_profiles.stfc_verifier.stfc_scraper import STFCProScraper, format_player_info
 
 log = logging.getLogger("veil_bot")
@@ -422,36 +422,13 @@ class AdminCog(commands.Cog):
             )
 
         embed = discord.Embed(
-            title=self._t.t(None, "wizard.welcome.title"),
-            description=self._t.t(None, "wizard.welcome.description"),
+            title="STFC Verification",
+            description="Click the button below to start the verification process.",
             colour=discord.Colour.blurple(),
         )
-        embed.add_field(
-            name=self._t.t(None, "wizard.welcome.field_what"),
-            value=self._t.t(None, "wizard.welcome.field_what_value"),
-            inline=False,
-        )
-        embed.add_field(
-            name=self._t.t(None, "wizard.welcome.field_rules"),
-            value=self._t.t(None, "wizard.welcome.field_rules_value"),
-            inline=False,
-        )
-        embed.add_field(
-            name=self._t.t(None, "wizard.welcome.field_ready"),
-            value=self._t.t(None, "wizard.welcome.field_ready_value"),
-            inline=False,
-        )
-        embed.set_footer(text=self._t.t(None, "wizard.welcome.footer"))
 
         try:
-            await channel.send(
-                embed=embed,
-                view=StartWizardView(
-                    store,
-                    lambda: _support_ticket_text(settings.support_channel_id),
-                    self._t,
-                ),
-            )
+            await channel.send(embed=embed, view=ChannelStartView())
             await interaction.followup.send(
                 f"✅ Verification button posted to <#{settings.verify_channel_id}>.",
                 ephemeral=True,

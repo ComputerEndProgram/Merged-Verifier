@@ -4,8 +4,91 @@ from typing import Callable, Optional
 import discord
 
 from bot.core.i18n.translator import Translator
+from bot.core.store import _support_ticket_text
 
 log = logging.getLogger("veil_bot")
+
+
+class ChannelStartView(discord.ui.View):
+    """Persistent view posted in the verify channel.  DMs the user with the
+    real StartWizardView when clicked, so the channel message stays intact."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Start Verification",
+        style=discord.ButtonStyle.green,
+        custom_id="channel_start_verification",
+    )
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        if not isinstance(user, discord.Member):
+            await interaction.response.send_message(
+                "❌ Could not start verification.", ephemeral=True,
+            )
+            return
+
+        from bot.core.i18n.translator import Translator as _T
+
+        # Import here to avoid circular imports at module level
+        from bot.core.store import ProfileStore, _support_ticket_text
+
+        store: ProfileStore = interaction.client.store  # type: ignore[attr-defined]
+        t: _T = interaction.client._t  # type: ignore[attr-defined]
+        settings = interaction.client.settings  # type: ignore[attr-defined]
+        locale = interaction.locale
+
+        if store.get_player_data(user.id):
+            await interaction.response.send_message(
+                t.t(locale, "wizard.already_verified",
+                    support_ticket=_support_ticket_text(settings.support_channel_id)),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            "✅ Verification wizard sent to your DMs!",
+            ephemeral=True,
+        )
+
+        try:
+            embed = discord.Embed(
+                title=t.t(locale, "wizard.welcome.title"),
+                description=t.t(locale, "wizard.welcome.description"),
+                colour=discord.Colour.blurple(),
+            )
+            embed.add_field(
+                name=t.t(locale, "wizard.welcome.field_what"),
+                value=t.t(locale, "wizard.welcome.field_what_value"),
+                inline=False,
+            )
+            embed.add_field(
+                name=t.t(locale, "wizard.welcome.field_rules"),
+                value=t.t(locale, "wizard.welcome.field_rules_value"),
+                inline=False,
+            )
+            embed.add_field(
+                name=t.t(locale, "wizard.welcome.field_ready"),
+                value=t.t(locale, "wizard.welcome.field_ready_value"),
+                inline=False,
+            )
+            embed.set_footer(text=t.t(locale, "wizard.welcome.footer"))
+
+            msg = await user.send(
+                embed=embed,
+                view=StartWizardView(
+                    store,
+                    lambda: _support_ticket_text(settings.support_channel_id),
+                    t,
+                ),
+            )
+            store.save_pending_wizard_view(msg.id, msg.channel.id, user.id, "StartWizardView")
+            log.info(f"[WIZARD] Sent verification DM to {user.id} via channel button")
+        except discord.Forbidden:
+            log.warning(f"[WIZARD] Could not send DM to {user.id} (DMs disabled)")
+        except Exception as e:
+            log.error(f"[WIZARD] Error sending verification DM to {user.id}: {e}")
 
 
 class StartWizardView(discord.ui.View):

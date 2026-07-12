@@ -17,6 +17,7 @@ from bot.config.settings import Settings
 from bot.core.i18n.translator import Translator
 from bot.core.store import ProfileStore, _support_ticket_text
 from bot.core.views import (
+    ChannelStartView,
     ConfirmVerificationView,
     RankConfirmationView,
     SessionExpiredView,
@@ -93,6 +94,9 @@ class BaseBot(commands.Bot, ABC):
 
         self.update_stfc_players.start()
         log.info("[SETUP] Background tasks started")
+
+        self.add_view(ChannelStartView())
+        log.info("[SETUP] Registered persistent ChannelStartView")
 
         await self._restore_pending_confirmations()
         await self._restore_pending_wizard_views()
